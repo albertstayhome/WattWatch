@@ -24,7 +24,7 @@ from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnec
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from core.config import BASE_DIR, ConfigManager, DATA_DIR, PSU_TIERS, RESOURCE_DIR, TAIPOWER_PRESETS
+from core.config import BASE_DIR, ConfigManager, DATA_DIR, PSU_TIERS, RESOURCE_DIR, TAIPOWER_PRESETS, set_autostart
 from core.power_engine import PowerEngine
 from core.sensors_lhm import check_pawnio_installed
 from core.storage import Storage
@@ -226,7 +226,16 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=None, help="HTTP server port")
     parser.add_argument("--no-browser", "--background", dest="no_browser", action="store_true", help="Do not launch desktop UI window")
     parser.add_argument("--no-tray", action="store_true", help="Disable system tray icon")
+    parser.add_argument("--enable-autostart", action="store_true", help="Register boot auto-start scheduled task and exit")
+    parser.add_argument("--disable-autostart", action="store_true", help="Remove boot auto-start scheduled task and exit")
     args = parser.parse_args()
+
+    if args.enable_autostart:
+        ok, _ = set_autostart(True)
+        sys.exit(0 if ok else 1)
+    if args.disable_autostart:
+        ok, _ = set_autostart(False)
+        sys.exit(0 if ok else 1)
 
     cfg = ConfigManager()
     port = args.port or int(cfg.get().get("port", 18742))

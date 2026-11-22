@@ -43,7 +43,7 @@ Name: "{autodesktop}\WattWatch 電量偵測管家"; Filename: "{app}\WattWatch.e
 
 [Run]
 Filename: "{tmp}\PawnIO_setup.exe"; Parameters: "-install -silent"; StatusMsg: "正在安裝 PawnIO 硬體感測驅動程式..."; Flags: runhidden waituntilterminated; Check: NeedsPawnIO
-Filename: "schtasks.exe"; Parameters: "/Create /TN ""WattWatch"" /SC ONLOGON /RL HIGHEST /F /TR ""\""{app}\WattWatch.exe\"" --no-browser"""; StatusMsg: "正在設定開機自動背景啟動..."; Flags: runhidden waituntilterminated; Tasks: autostart
+Filename: "{app}\WattWatch.exe"; Parameters: "--enable-autostart"; StatusMsg: "正在設定開機自動背景啟動..."; Flags: runhidden waituntilterminated; Tasks: autostart
 Filename: "{app}\WattWatch.exe"; Description: "立即啟動 WattWatch 電量偵測管家"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]

@@ -106,13 +106,30 @@ def set_autostart(enabled: bool) -> tuple[bool, str]:
     _cleanup_legacy_run_key()
     try:
         if enabled:
-            task_cmd = f'"{sys.executable}" --no-browser' if IS_FROZEN else f'wscript.exe "{str(VBS_LAUNCHER)}" --no-browser'
+            if IS_FROZEN:
+                exe_path = str(Path(sys.executable).resolve()).replace("'", "''")
+                arg_str = "--no-browser"
+            else:
+                exe_path = "wscript.exe"
+                arg_str = f'"{str(VBS_LAUNCHER)}" --no-browser'.replace("'", "''")
+            work_dir = str(BASE_DIR).replace("'", "''")
+
+            ps_cmd = (
+                "$ErrorActionPreference = 'Stop'; "
+                f"$action = New-ScheduledTaskAction -Execute '{exe_path}' -Argument '{arg_str}' -WorkingDirectory '{work_dir}'; "
+                "$trigger = New-ScheduledTaskTrigger -AtLogOn; "
+                "$user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name; "
+                "$principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest; "
+                "$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries "
+                "-ExecutionTimeLimit (New-TimeSpan -Seconds 0) -StartWhenAvailable -MultipleInstances IgnoreNew; "
+                f"Register-ScheduledTask -TaskName '{TASK_NAME}' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null"
+            )
             proc = subprocess.run(
-                ["schtasks", "/Create", "/TN", TASK_NAME, "/SC", "ONLOGON", "/RL", "HIGHEST", "/F", "/TR", task_cmd],
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_cmd],
                 capture_output=True,
                 text=True,
                 errors="replace",
-                timeout=10,
+                timeout=15,
                 creationflags=_CREATE_NO_WINDOW,
             )
             if proc.returncode == 0:
