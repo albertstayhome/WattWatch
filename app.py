@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import datetime
+import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -48,11 +50,47 @@ def find_app_browser() -> str | None:
     return None
 
 
+def _prepare_clean_browser_profile(profile_dir: Path) -> None:
+    legacy_dir = DATA_DIR / "ui_profile"
+    if legacy_dir.exists():
+        shutil.rmtree(legacy_dir, ignore_errors=True)
+
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    first_run_file = profile_dir / "First Run"
+    if not first_run_file.exists():
+        try:
+            first_run_file.write_text("", encoding="utf-8")
+        except Exception:
+            pass
+
+    default_dir = profile_dir / "Default"
+    default_dir.mkdir(parents=True, exist_ok=True)
+    prefs_file = default_dir / "Preferences"
+    if not prefs_file.exists():
+        prefs_data = {
+            "browser": {
+                "has_seen_welcome_page": True,
+                "check_default_browser": False,
+            },
+            "signin": {
+                "allowed": False,
+                "allowed_on_next_startup": False,
+            },
+            "sync": {
+                "suppress_start": True,
+            },
+        }
+        try:
+            prefs_file.write_text(json.dumps(prefs_data), encoding="utf-8")
+        except Exception:
+            pass
+
+
 def open_app_window(url: str) -> None:
     browser = find_app_browser()
     if browser:
-        profile_dir = DATA_DIR / "ui_profile"
-        profile_dir.mkdir(parents=True, exist_ok=True)
+        profile_dir = DATA_DIR / "ui_profile_clean"
+        _prepare_clean_browser_profile(profile_dir)
         try:
             subprocess.Popen(
                 [
@@ -60,6 +98,14 @@ def open_app_window(url: str) -> None:
                     f"--app={url}",
                     "--window-size=1280,860",
                     f"--user-data-dir={str(profile_dir)}",
+                    "--disable-extensions",
+                    "--disable-component-extensions-with-background-pages",
+                    "--disable-default-apps",
+                    "--disable-sync",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--disable-background-networking",
+                    "--disable-features=msEdgeFirstRunImport,msAutoImport,msEdgeSidebarV2,msUndersideButton,msHubApps",
                 ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
