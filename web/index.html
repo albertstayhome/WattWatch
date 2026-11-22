@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WattWatch 電量偵測管家</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Top Header -->
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-icon" aria-hidden="true">⚡</div>
+        <div>
+          <h1>WattWatch 電量偵測管家</h1>
+          <p class="subtitle" id="system-summary">正在偵測電腦與螢幕硬體...</p>
+        </div>
+      </div>
+
+      <div class="topbar-right">
+        <div class="status-pill" id="live-status-pill">
+          <span class="dot"></span>
+          <span id="live-status-text">連線中...</span>
+        </div>
+        <div class="sensor-badges" id="sensor-badges"></div>
+        <button class="btn btn-secondary" id="btn-rescan-top" title="重新偵測硬體與螢幕">
+          🔄 重新掃描
+        </button>
+      </div>
+    </header>
+
+    <!-- 4 KPI Hero Cards -->
+    <section class="kpi-grid">
+      <div class="kpi-card kpi-primary">
+        <div class="kpi-label">目前牆壁總耗電 (AC)</div>
+        <div class="kpi-value"><span id="kpi-total-w">--</span> <span class="unit">W</span></div>
+        <div class="kpi-sub" id="kpi-total-sub">主機 -- W + 螢幕 -- W</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">今日累積電量與電費</div>
+        <div class="kpi-value"><span id="kpi-today-kwh">--</span> <span class="unit">度 (kWh)</span></div>
+        <div class="kpi-sub" id="kpi-today-cost">約 NT$ -- (費率 -- 元/度)</div>
+      </div>
+      <div class="kpi-card kpi-monitor">
+        <div class="kpi-label">顯示器即時功耗與今日用電</div>
+        <div class="kpi-value"><span id="kpi-mon-w">--</span> <span class="unit">W</span></div>
+        <div class="kpi-sub" id="kpi-mon-sub">今日顯示器 -- 度 (NT$ --) ｜ 開啟時長 --</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">若維持目前功耗預估月電費</div>
+        <div class="kpi-value">NT$ <span id="kpi-month-cost">--</span></div>
+        <div class="kpi-sub" id="kpi-month-sub">約 -- 度/月（以每日 10 小時推算）</div>
+      </div>
+    </section>
+
+    <!-- Tab Navigation -->
+    <nav class="tabs" role="tablist">
+      <button class="tab-btn active" data-tab="overview">📊 即時總覽</button>
+      <button class="tab-btn" data-tab="debate">🧮 電費試算與模擬</button>
+      <button class="tab-btn" data-tab="history">📈 歷史統計與報表</button>
+      <button class="tab-btn" data-tab="settings">⚙️ 設備校準與設定</button>
+    </nav>
+
+    <!-- Tab 1: Overview -->
+    <main id="tab-overview" class="tab-panel active">
+      <div class="notice-banner hidden" id="pawnio-banner">
+        <div>
+          <strong>💡 提示：CPU 目前使用負載模型估算</strong>
+          <span id="pawnio-banner-msg">安裝 PawnIO 驅動並以系統管理員啟動，即可直接讀取 Intel/AMD CPU 硬體 RAPL 實測瓦數（GPU 與螢幕已可正常運作）。</span>
+        </div>
+        <div class="banner-actions">
+          <button class="btn btn-sm btn-primary" id="btn-go-pawnio">前往設定啟用</button>
+          <button class="btn btn-sm btn-ghost" id="btn-dismiss-banner">暫時隱藏</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <div>
+            <h2>即時功耗變化曲線（最近 3 分鐘）</h2>
+            <p class="panel-desc">每秒自動採樣，支援滑鼠懸停檢視精確瓦數與切換顯示曲線</p>
+          </div>
+          <div class="chart-toggles" id="live-chart-toggles">
+            <label class="toggle-chip active" data-series="total_ac_w" style="--chip-color:#38bdf8">總耗電 AC</label>
+            <label class="toggle-chip active" data-series="pc_ac_w" style="--chip-color:#a855f7">主機 AC</label>
+            <label class="toggle-chip active" data-series="monitors_w" style="--chip-color:#22d3ee">螢幕</label>
+            <label class="toggle-chip active" data-series="gpu_w" style="--chip-color:#f472b6">GPU</label>
+            <label class="toggle-chip active" data-series="cpu_w" style="--chip-color:#22c55e">CPU</label>
+          </div>
+        </div>
+        <div class="canvas-wrap">
+          <canvas id="live-chart" height="250"></canvas>
+          <div class="chart-tooltip hidden" id="live-chart-tooltip"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <div>
+            <h2>各設備即時耗電拆解</h2>
+            <p class="panel-desc">清楚標示「🟢 實測感測器」、「🟡 模型估算」與「🔵 手動校準」，外接螢幕直接吃市電，不重複計入電供損耗</p>
+          </div>
+          <div class="legend-inline">
+            <span class="badge badge-measured">🟢 實測感測器</span>
+            <span class="badge badge-estimated">🟡 模型估算</span>
+            <span class="badge badge-calibrated">🔵 手動校準</span>
+          </div>
+        </div>
+        <div class="components-grid" id="components-grid"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <h2>自動偵測到的電腦硬體清單</h2>
+        </div>
+        <div class="hw-summary-grid" id="hw-summary-grid"></div>
+      </div>
+    </main>
+
+    <!-- Tab 2: Power & Electricity Cost Simulator -->
+    <main id="tab-debate" class="tab-panel">
+      <div class="debate-hero">
+        <div>
+          <h2>🧮 電費試算與情境模擬</h2>
+          <p>根據自動偵測的電腦主機與顯示器功耗，搭配台電電價客觀試算每日、每月與每年預估用電與電費</p>
+        </div>
+        <button class="btn btn-primary btn-lg" id="btn-copy-battle-report">
+          📋 複製用電統計摘要
+        </button>
+      </div>
+
+      <div class="two-col">
+        <div class="panel">
+          <div class="panel-header">
+            <h3>1. 偵測到的顯示器即時狀態</h3>
+          </div>
+          <div id="debate-monitors-list" class="monitor-cards"></div>
+
+          <div class="panel-header" style="margin-top: 18px;">
+            <h3>2. 情境模擬設定</h3>
+          </div>
+          <div class="scenario-tabs" id="scenario-tabs">
+            <button class="scenario-btn active" data-scenario="monitor_only">僅計算顯示器耗電</button>
+            <button class="scenario-btn" data-scenario="pc_idle_monitor">主機待機＋顯示器開啟</button>
+            <button class="scenario-btn" data-scenario="current_total">目前整組電腦總功耗</button>
+          </div>
+
+          <div class="scenario-tabs" id="sim-period-tabs" style="margin-bottom:10px">
+            <button class="scenario-btn active" data-period="avg">依週平均尖離峰比例</button>
+            <button class="scenario-btn" data-period="peak">純尖峰時段</button>
+            <button class="scenario-btn" data-period="offpeak">純離峰／週末時段</button>
+          </div>
+
+          <div class="slider-box">
+            <div class="slider-top">
+              <span>每日使用 / 運作時數：</span>
+              <strong id="debate-hours-label">8 小時 / 天</strong>
+            </div>
+            <input type="range" id="debate-hours-slider" min="1" max="24" step="0.5" value="8" />
+            <div class="slider-ticks">
+              <span>1小時</span><span>6小時</span><span>12小時</span><span>18小時</span><span>24小時</span>
+            </div>
+          </div>
+
+          <div class="calc-explain" id="debate-calc-explain"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <h3>3. 預估電量與電費結果</h3>
+          </div>
+          <div class="waste-cards">
+            <div class="waste-card">
+              <div class="waste-period">每日預估電費</div>
+              <div class="waste-money" id="waste-day-ntd">NT$ --</div>
+              <div class="waste-kwh" id="waste-day-kwh">-- 度</div>
+            </div>
+            <div class="waste-card">
+              <div class="waste-period">每月 (30天) 預估電費</div>
+              <div class="waste-money" id="waste-month-ntd">NT$ --</div>
+              <div class="waste-kwh" id="waste-month-kwh">-- 度</div>
+            </div>
+            <div class="waste-card">
+              <div class="waste-period">每年 (365天) 預估電費</div>
+              <div class="waste-money" id="waste-year-ntd">NT$ --</div>
+              <div class="waste-kwh" id="waste-year-kwh">-- 度</div>
+            </div>
+          </div>
+
+          <div class="fun-compare" id="debate-fun-compare"></div>
+
+          <div class="panel-header" style="margin-top: 20px;">
+            <h3>4. 今日實際監測統計</h3>
+          </div>
+          <div class="evidence-grid" id="debate-evidence-grid"></div>
+        </div>
+      </div>
+    </main>
+
+    <!-- Tab 3: History & Reports -->
+    <main id="tab-history" class="tab-panel">
+      <div class="panel">
+        <div class="panel-header">
+          <div>
+            <h2>歷史耗電統計</h2>
+            <p class="panel-desc">SQLite 本地持久化儲存（採用 WAL 模式，每 30 秒及關閉時自動寫入，電腦重新開機也不遺失）</p>
+          </div>
+          <div class="history-controls">
+            <div class="range-pills" id="history-range-pills">
+              <button class="range-btn" data-range="session">本次啟動</button>
+              <button class="range-btn active" data-range="today">今日</button>
+              <button class="range-btn" data-range="7d">近 7 天</button>
+              <button class="range-btn" data-range="30d">近 30 天</button>
+            </div>
+            <button class="btn btn-secondary" id="btn-export-csv">📥 匯出 CSV</button>
+            <button class="btn btn-ghost" id="btn-reset-session">🔄 重置本次統計</button>
+          </div>
+        </div>
+
+        <div class="history-kpis" id="history-kpis"></div>
+
+        <div class="two-col" style="margin-top: 16px;">
+          <div class="subpanel">
+            <h3>主機 vs 螢幕 用電時段分佈 (Wh)</h3>
+            <canvas id="history-bar-chart" height="240"></canvas>
+          </div>
+          <div class="subpanel">
+            <h3>耗電佔比圓餅圖</h3>
+            <div class="donut-wrap">
+              <svg id="history-donut" viewBox="0 0 200 200" width="180" height="180"></svg>
+              <div id="history-donut-legend" class="donut-legend"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <h3>各項目累積電量明細</h3>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>設備 / 項目</th>
+                <th>分類</th>
+                <th>累積電量 (Wh)</th>
+                <th>度數 (kWh)</th>
+                <th>預估電費 (NT$)</th>
+                <th>佔比</th>
+                <th>監測時長</th>
+              </tr>
+            </thead>
+            <tbody id="history-devices-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </main>
+
+    <!-- Tab 4: Calibration & Settings -->
+    <main id="tab-settings" class="tab-panel">
+      <div class="two-col">
+        <div class="panel">
+          <div class="panel-header">
+            <h3>⚡ 台電電價與電源供應器設定</h3>
+          </div>
+          <div class="form-group">
+            <label for="cfg-tariff-mode">計費方式</label>
+            <select id="cfg-tariff-mode">
+              <option value="tou_2tier">台電簡易型二段式時間電價（自動依夏月／非夏月與尖離峰計費，不含基本費）</option>
+              <option value="fixed">自訂固定費率 / 台電一般累進級距參考</option>
+            </select>
+          </div>
+          <div class="subpanel" id="tou-info-box" style="margin-bottom:12px;font-size:12.5px;color:#cbd5e1">
+            <strong>⚡ 台電簡易型二段式時間電價自動規則（不含基本費）：</strong><br/>
+            • <strong>夏月 (6/1～9/30)</strong>：週一至五 09:00–24:00 尖峰 <b>5.16 元/度</b>｜00:00–09:00 離峰 <b>2.06 元/度</b><br/>
+            • <strong>非夏月 (10/1～5/31)</strong>：週一至五 06:00–11:00 及 14:00–24:00 尖峰 <b>4.93 元/度</b>｜其餘離峰 <b>1.99 元/度</b><br/>
+            • <strong>週六、週日全日</strong>皆以離峰費率計算（夏月 2.06 / 非夏月 1.99 元/度）
+          </div>
+          <div id="fixed-rate-fields" class="hidden">
+            <div class="form-group">
+              <label for="cfg-tariff-preset">台電電價級距快速選擇（固定參考用）</label>
+              <select id="cfg-tariff-preset"></select>
+            </div>
+            <div class="form-group">
+              <label for="cfg-rate-ntd">每度電價 (NT$ / kWh)</label>
+              <input type="number" id="cfg-rate-ntd" step="0.01" min="0.1" max="50" />
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="cfg-psu-tier">電源供應器 80 PLUS 等級</label>
+              <select id="cfg-psu-tier"></select>
+            </div>
+            <div class="form-group">
+              <label for="cfg-psu-watts">電源供應器額定瓦數 (W)</label>
+              <input type="number" id="cfg-psu-watts" step="50" min="150" max="2500" />
+            </div>
+          </div>
+
+          <div class="panel-header" style="margin-top: 18px;">
+            <h3>🖥️ 外接螢幕校準</h3>
+          </div>
+          <div id="settings-monitors-list"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <h3>🔌 額外桌面外接電器（可選）</h3>
+          </div>
+          <p class="panel-desc">如果有電腦喇叭、RGB 桌燈、USB 充電座等想一起算進總耗電，可以在這裡新增：</p>
+          <div class="ext-add-row">
+            <input type="text" id="ext-name" placeholder="例如：桌面喇叭 / 螢幕掛燈" />
+            <input type="number" id="ext-watts" placeholder="瓦數 (W)" step="0.5" min="0.1" max="3000" />
+            <button class="btn btn-primary" id="btn-add-ext">＋ 新增</button>
+          </div>
+          <div id="ext-devices-list" class="ext-list"></div>
+
+          <div class="panel-header" style="margin-top: 24px;">
+            <h3>🛠️ 系統與進階感測器設定</h3>
+          </div>
+          <div class="settings-actions">
+            <label class="switch-row">
+              <div>
+                <strong>Windows 開機自動啟動背景監控</strong>
+                <div class="small-muted">透過 Windows 工作排程器以最高權限於開機時自動背景啟動（無 UAC 跳窗、極低耗電）</div>
+              </div>
+              <input type="checkbox" id="cfg-autostart" />
+            </label>
+
+            <div class="action-card">
+              <div>
+                <strong>CPU 硬體實測感測器 (PawnIO 驅動)</strong>
+                <div class="small-muted" id="pawnio-status-text">檢查中...</div>
+              </div>
+              <button class="btn btn-secondary" id="btn-install-pawnio">安裝 / 檢查 PawnIO</button>
+            </div>
+          </div>
+
+          <div class="save-bar">
+            <button class="btn btn-primary btn-lg" id="btn-save-settings">💾 儲存所有設定</button>
+            <span id="settings-save-msg" class="save-msg"></span>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <div class="toast hidden" id="toast"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
