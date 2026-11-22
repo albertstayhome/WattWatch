@@ -143,9 +143,10 @@ class LhmSensorBridge:
                 continue
 
     def _http_fallback_loop(self) -> None:
-        # Check external LHM Web Server (localhost:8085) every 15s ONLY if bridge lacks cpu_power_w
+        # Check external LHM Web Server (localhost:8085) ONLY if bridge lacks cpu_power_w
         while not self._stop_event.is_set():
             snap = self.get_snapshot()
+            wait_sec = 60.0 if (snap.get("cpu_power_w") is not None) else 15.0
             if snap.get("cpu_power_w") is None:
                 try:
                     resp = requests.get("http://127.0.0.1:8085/data.json", timeout=1.0)
@@ -158,7 +159,17 @@ class LhmSensorBridge:
                             self._http_last_ts = time.time()
                 except Exception:
                     pass
-            self._stop_event.wait(15.0)
+            self._stop_event.wait(wait_sec)
+
+    def request_gc(self) -> None:
+        with self._stdin_lock:
+            proc = self._proc
+            if proc is not None and proc.poll() is None and proc.stdin is not None:
+                try:
+                    proc.stdin.write("gc\n")
+                    proc.stdin.flush()
+                except Exception:
+                    pass
 
     def set_interval_ms(self, ms: int) -> None:
         clamped = max(1000, min(10000, int(ms)))

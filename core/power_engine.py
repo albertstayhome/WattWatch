@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import collections
+import ctypes
 import datetime
+import gc
 import threading
 import time
 from typing import Any
@@ -75,6 +77,10 @@ class PowerEngine:
         self._cached_today_date: str = ""
         self._cached_today_ts: float = 0.0
 
+        self._cached_month_base: dict[str, Any] | None = None
+        self._cached_month_key: str = ""
+        self._cached_month_ts: float = 0.0
+
     @staticmethod
     def _new_accum() -> dict[str, Any]:
         return {
@@ -109,7 +115,35 @@ class PowerEngine:
     def unregister_ui_client(self) -> None:
         with self._lock:
             self._ui_clients = max(0, self._ui_clients - 1)
+            empty = self._ui_clients == 0
         self._apply_adaptive_mode()
+        if empty:
+            threading.Thread(target=self._trim_memory, name="WattWatchTrim", daemon=True).start()
+
+    @staticmethod
+    def _apply_low_impact_priority() -> None:
+        try:
+            k32 = ctypes.windll.kernel32
+            k32.GetCurrentProcess.restype = ctypes.c_void_p
+            k32.SetPriorityClass.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+            # BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
+            k32.SetPriorityClass(k32.GetCurrentProcess(), 0x00004000)
+        except Exception:
+            pass
+
+    def _trim_memory(self) -> None:
+        try:
+            gc.collect()
+            k32 = ctypes.windll.kernel32
+            k32.GetCurrentProcess.restype = ctypes.c_void_p
+            k32.SetProcessWorkingSetSize.argtypes = [ctypes.c_void_p, ctypes.c_ssize_t, ctypes.c_ssize_t]
+            k32.SetProcessWorkingSetSize(k32.GetCurrentProcess(), -1, -1)
+        except Exception:
+            pass
+        try:
+            self.lhm.request_gc()
+        except Exception:
+            pass
 
     def _apply_adaptive_mode(self) -> tuple[float, str]:
         with self._lock:
@@ -129,6 +163,7 @@ class PowerEngine:
         return poll_sec, mode
 
     def start(self) -> None:
+        self._apply_low_impact_priority()
         self.hardware = discover_all_hardware()
         self.lhm.start()
         self.monitor_sensor.start()
@@ -148,6 +183,7 @@ class PowerEngine:
         self._loop_wake.clear()
         self._thread = threading.Thread(target=self._loop, name="PowerEngineLoop", daemon=True)
         self._thread.start()
+        threading.Timer(2.5, self._trim_memory).start()
 
     def rescan_hardware(self) -> dict[str, Any]:
         hw = discover_all_hardware()
@@ -579,6 +615,7 @@ class PowerEngine:
                 self._flush_locked()
 
             today_totals = self._compute_today_totals_locked(date_str, rate_ntd, cfg)
+            month_totals = self._compute_this_month_totals_locked(date_str, rate_ntd, cfg)
             eff_today_rate = (
                 (today_totals["total_cost_ntd"] / today_totals["total_kwh"])
                 if today_totals["total_kwh"] > 0
@@ -747,6 +784,7 @@ class PowerEngine:
                 "gpus": gpu_items,
                 "components": components,
                 "today": today_totals,
+                "this_month": month_totals,
                 "session": self._build_session_summary_locked(rate_ntd),
                 "sensors": {
                     "nvml_active": self.nvml.available,
@@ -835,6 +873,65 @@ class PowerEngine:
             "monitor_idle_waste_cost_ntd": round(waste_cost, 2),
         }
 
+    def _compute_this_month_totals_locked(self, date_str: str, rate_ntd: float, cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+        now = time.time()
+        month_key = date_str[:7]
+        y_str, m_str = month_key.split("-", 1)
+        year_i, month_i = int(y_str), int(m_str)
+        if (
+            self._cached_month_base is None
+            or self._cached_month_key != month_key
+            or (now - self._cached_month_ts) >= 60.0
+        ):
+            self._cached_month_base = self.storage.get_month_summary(year_i, month_i, rate_ntd=rate_ntd, cfg=cfg)
+            self._cached_month_key = month_key
+            self._cached_month_ts = now
+
+        base = self._cached_month_base
+        add_tot_wh = 0.0
+        add_mon_wh = 0.0
+        add_cost = 0.0
+        add_mon_cost = 0.0
+        add_dur = 0.0
+        today_pending = False
+        for b in self._pending_buckets.values():
+            if not str(b.get("date", "")).startswith(month_key):
+                continue
+            if b["date"] == date_str and b["duration_sec"] > 0:
+                today_pending = True
+            dur = b["duration_sec"]
+            add_dur += dur
+            add_tot_wh += b["total_ac_w"] * dur / 3600.0
+            add_mon_wh += b["monitors_w"] * dur / 3600.0
+            add_cost += b.get("cost_ntd", (b["total_ac_w"] * dur / 3600.0 / 1000.0) * rate_ntd)
+            add_mon_cost += b.get("monitors_cost_ntd", (b["monitors_w"] * dur / 3600.0 / 1000.0) * rate_ntd)
+
+        tot_wh = float(base.get("total_wh", 0.0)) + add_tot_wh
+        mon_wh = float(base.get("monitors_wh", 0.0)) + add_mon_wh
+        tot_cost = float(base.get("total_cost_ntd", 0.0)) + add_cost
+        mon_cost = float(base.get("monitors_cost_ntd", 0.0)) + add_mon_cost
+        active_days = int(base.get("active_days", 0))
+        if today_pending:
+            cal = base.get("calendar_days") or []
+            today_recorded = any(d.get("date") == date_str and d.get("has_data") for d in cal)
+            if not today_recorded:
+                active_days += 1
+
+        return {
+            "year": year_i,
+            "month": month_i,
+            "month_key": month_key,
+            "month_label": f"{year_i}年{month_i}月",
+            "total_wh": round(tot_wh, 2),
+            "total_kwh": round(tot_wh / 1000.0, 4),
+            "total_cost_ntd": round(tot_cost, 2),
+            "monitors_kwh": round(mon_wh / 1000.0, 4),
+            "monitors_cost_ntd": round(mon_cost, 2),
+            "monitor_pct": round((mon_wh / tot_wh * 100.0) if tot_wh > 0 else 0.0, 1),
+            "duration_sec": round(float(base.get("duration_sec", 0.0)) + add_dur, 1),
+            "active_days": active_days,
+        }
+
     def _build_session_summary_locked(self, rate_ntd: float) -> dict[str, Any]:
         s = self._session
         tot_wh = s["total_wh"]
@@ -886,6 +983,7 @@ class PowerEngine:
         self._pending_devices.clear()
         self._last_flush_ts = time.time()
         self._cached_today_base = None  # Refresh base next check
+        self._cached_month_base = None
         if buckets or devices:
             self.storage.record_flush(buckets, devices)
 
@@ -898,7 +996,7 @@ class PowerEngine:
             snap["chart_history"] = list(self.history_buffer)
             return snap
 
-    def get_history(self, range_key: str = "today") -> dict[str, Any]:
+    def get_history(self, range_key: str = "today", month_key: str | None = None) -> dict[str, Any]:
         cfg = self.config.get()
         rate = float(get_effective_rate_info(cfg)["rate_ntd"])
         with self._lock:
@@ -916,6 +1014,14 @@ class PowerEngine:
                 ]
                 return data
             self._flush_locked()
+        if range_key == "month":
+            if month_key and "-" in month_key:
+                y_s, m_s = month_key.split("-", 1)
+                year_i, month_i = int(y_s), int(m_s)
+            else:
+                today = datetime.date.today()
+                year_i, month_i = today.year, today.month
+            return self.storage.get_month_summary(year_i, month_i, rate_ntd=rate, cfg=cfg)
         return self.storage.get_summary(range_key=range_key, rate_ntd=rate, cfg=cfg)
 
     def flush_now(self) -> None:

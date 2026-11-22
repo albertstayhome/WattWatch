@@ -256,6 +256,93 @@ class TestPowerEngineAndDatabase(unittest.TestCase):
         self.assertEqual(r_mon_noon, 1.99)
         self.assertEqual(r_mon_eve, 4.93)
 
+    def test_calendar_month_summary_and_csv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            cfg = ConfigManager(tmp_dir / "config.json")
+            store = Storage(db_path=tmp_dir / "power.db")
+
+            def _make_bucket(dt_obj: datetime.datetime, total_w: float = 1000.0) -> dict:
+                return {
+                    "ts": int(dt_obj.timestamp()),
+                    "date": dt_obj.date().isoformat(),
+                    "hour": dt_obj.hour,
+                    "total_ac_w": total_w,
+                    "pc_ac_w": total_w * 0.9,
+                    "monitors_w": total_w * 0.1,
+                    "cpu_w": total_w * 0.3,
+                    "gpu_w": total_w * 0.2,
+                    "ram_w": total_w * 0.05,
+                    "storage_w": total_w * 0.05,
+                    "mb_fans_w": total_w * 0.15,
+                    "peripherals_w": total_w * 0.05,
+                    "psu_loss_w": total_w * 0.1,
+                    "external_w": 0.0,
+                    "duration_sec": 3600.0,
+                    "monitor_on_sec": 3600.0,
+                    "monitor_idle_waste_sec": 0.0,
+                    "monitor_idle_waste_wh": 0.0,
+                }
+
+            today = datetime.date.today()
+            dt_today = datetime.datetime.combine(today, datetime.time(12, 0))
+            store.record_flush(
+                [
+                    _make_bucket(datetime.datetime(2024, 1, 31, 23, 0), 1000.0),
+                    _make_bucket(datetime.datetime(2024, 2, 24, 14, 0), 1000.0),
+                    _make_bucket(datetime.datetime(2024, 2, 29, 10, 0), 1000.0),
+                    _make_bucket(datetime.datetime(2024, 3, 1, 0, 0), 1000.0),
+                    _make_bucket(dt_today, 500.0),
+                ],
+                [],
+            )
+
+            feb = store.get_month_summary(2024, 2, cfg=cfg.get())
+            self.assertEqual(feb["month_key"], "2024-02")
+            self.assertEqual(feb["days_in_month"], 29)
+            self.assertEqual(len(feb["calendar_days"]), 29)
+            self.assertEqual(feb["active_days"], 2)
+            self.assertAlmostEqual(feb["total_kwh"], 2.0, places=3)
+            self.assertAlmostEqual(feb["total_cost_ntd"], 6.92, places=2)
+            self.assertEqual(feb["calendar_days"][23]["date"], "2024-02-24")
+            self.assertAlmostEqual(feb["calendar_days"][23]["cost_ntd"], 1.99, places=2)
+            self.assertEqual(feb["calendar_days"][28]["date"], "2024-02-29")
+            self.assertAlmostEqual(feb["calendar_days"][28]["cost_ntd"], 4.93, places=2)
+            self.assertIn("2024-02", feb["available_months"])
+
+            csv_text = store.export_csv(range_key="month", cfg=cfg.get(), month_key="2024-02")
+            self.assertIn("2024-02-24", csv_text)
+            self.assertIn("2024-02-29", csv_text)
+            self.assertNotIn("2024-01-31", csv_text)
+            self.assertNotIn("2024-03-01", csv_text)
+
+            eng = PowerEngine(cfg, store)
+            try:
+                with TestClient(create_app(cfg, store, eng)) as client:
+                    live = client.get("/api/live")
+                    self.assertEqual(live.status_code, 200)
+                    live_json = live.json()
+                    self.assertIn("this_month", live_json)
+                    self.assertEqual(live_json["this_month"]["month_key"], today.strftime("%Y-%m"))
+                    self.assertGreaterEqual(live_json["this_month"]["total_kwh"], 0.5)
+
+                    hist = client.get("/api/history?range=month&month=2024-02")
+                    self.assertEqual(hist.status_code, 200)
+                    hist_json = hist.json()
+                    self.assertEqual(hist_json["days_in_month"], 29)
+                    self.assertEqual(len(hist_json["calendar_days"]), 29)
+                    self.assertEqual(hist_json["active_days"], 2)
+                    self.assertAlmostEqual(hist_json["total_cost_ntd"], 6.92, places=2)
+
+                    csv_res = client.get("/api/export.csv?range=month&month=2024-02")
+                    self.assertEqual(csv_res.status_code, 200)
+                    self.assertIn("wattwatch_month_202402.csv", csv_res.headers.get("content-disposition", ""))
+                    self.assertIn("2024-02-29", csv_res.text)
+                    self.assertNotIn("2024-03-01", csv_res.text)
+            finally:
+                eng.stop()
+                store.close()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import calendar
 import csv
 import datetime
 import io
@@ -176,14 +177,32 @@ class Storage:
             start = today
         return start.isoformat(), today.isoformat()
 
-    def get_summary(
+    @staticmethod
+    def _month_bounds(year: int, month: int) -> tuple[str, str, int]:
+        num_days = calendar.monthrange(year, month)[1]
+        start = datetime.date(year, month, 1).isoformat()
+        end = datetime.date(year, month, num_days).isoformat()
+        return start, end, num_days
+
+    def get_available_months(self) -> list[str]:
+        cur_ym = datetime.date.today().strftime("%Y-%m")
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT substr(date, 1, 7) AS ym FROM minute_samples ORDER BY ym DESC"
+            ).fetchall()
+        months = [str(r["ym"]) for r in rows if r["ym"]]
+        if cur_ym not in months:
+            months.insert(0, cur_ym)
+        return sorted(set(months), reverse=True)
+
+    def _query_range_summary(
         self,
-        range_key: str = "today",
+        start_date: str,
+        end_date: str,
+        range_key: str,
         rate_ntd: float = 3.13,
-        ref_date: datetime.date | None = None,
         cfg: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        start_date, end_date = self._date_bounds(range_key, ref_date=ref_date)
+    ) -> tuple[dict[str, Any], dict[str, dict[str, float]]]:
         with self._lock:
             row = self._conn.execute(
                 """
@@ -218,7 +237,9 @@ class Storage:
                     COALESCE(SUM(monitors_w * duration_sec / 3600.0), 0.0) AS monitors_wh,
                     COALESCE(SUM(external_w * duration_sec / 3600.0), 0.0) AS external_wh,
                     COALESCE(SUM(total_ac_w * duration_sec / 3600.0), 0.0) AS total_wh,
-                    COALESCE(SUM(monitor_idle_waste_wh), 0.0) AS idle_waste_wh
+                    COALESCE(SUM(monitor_idle_waste_wh), 0.0) AS idle_waste_wh,
+                    COALESCE(SUM(duration_sec), 0.0) AS duration_sec,
+                    COALESCE(SUM(monitor_on_sec), 0.0) AS monitor_on_sec
                 FROM minute_samples
                 WHERE date >= ? AND date <= ?
                 GROUP BY date, hour
@@ -242,6 +263,8 @@ class Storage:
                 p_wh = float(r["pc_wh"])
                 e_wh = float(r["external_wh"])
                 w_wh = float(r["idle_waste_wh"])
+                d_sec = float(r["duration_sec"])
+                mon_sec = float(r["monitor_on_sec"])
                 c_tot = (t_wh / 1000.0) * row_rate
                 c_mon = (m_wh / 1000.0) * row_rate
                 c_wst = (w_wh / 1000.0) * row_rate
@@ -258,13 +281,18 @@ class Storage:
                     hb["idle_waste_wh"] += w_wh
                     hb["cost_ntd"] += c_tot
 
-                db = by_date.setdefault(r_date, {"pc_wh": 0.0, "monitors_wh": 0.0, "external_wh": 0.0, "total_wh": 0.0, "idle_waste_wh": 0.0, "cost_ntd": 0.0})
+                db = by_date.setdefault(
+                    r_date,
+                    {"pc_wh": 0.0, "monitors_wh": 0.0, "external_wh": 0.0, "total_wh": 0.0, "idle_waste_wh": 0.0, "cost_ntd": 0.0, "duration_sec": 0.0, "monitor_on_sec": 0.0},
+                )
                 db["pc_wh"] += p_wh
                 db["monitors_wh"] += m_wh
                 db["external_wh"] += e_wh
                 db["total_wh"] += t_wh
                 db["idle_waste_wh"] += w_wh
                 db["cost_ntd"] += c_tot
+                db["duration_sec"] += d_sec
+                db["monitor_on_sec"] += mon_sec
 
             if range_key == "today":
                 series = []
@@ -320,7 +348,7 @@ class Storage:
         total_kwh = total_wh / 1000.0
         waste_wh = float(row["monitor_idle_waste_wh"])
         use_stored_dev_cost = (cfg is None) or (str(cfg.get("tariff_mode") or "tou_2tier").lower() == "tou_2tier")
-        return {
+        summary = {
             "range": range_key,
             "start_date": start_date,
             "end_date": end_date,
@@ -367,6 +395,90 @@ class Storage:
                 for d in dev_rows
             ],
         }
+        return summary, by_date
+
+    def get_summary(
+        self,
+        range_key: str = "today",
+        rate_ntd: float = 3.13,
+        ref_date: datetime.date | None = None,
+        cfg: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        start_date, end_date = self._date_bounds(range_key, ref_date=ref_date)
+        summary, _ = self._query_range_summary(start_date, end_date, range_key, rate_ntd=rate_ntd, cfg=cfg)
+        return summary
+
+    def get_month_summary(
+        self,
+        year: int,
+        month: int,
+        rate_ntd: float = 1.99,
+        cfg: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        start_date, end_date, num_days = self._month_bounds(year, month)
+        summary, by_date = self._query_range_summary(start_date, end_date, "month", rate_ntd=rate_ntd, cfg=cfg)
+
+        first_wd_sun0 = (datetime.date(year, month, 1).weekday() + 1) % 7
+        calendar_days: list[dict[str, Any]] = []
+        daily_series: list[dict[str, Any]] = []
+        active_days = 0
+
+        for day in range(1, num_days + 1):
+            d_obj = datetime.date(year, month, day)
+            d_str = d_obj.isoformat()
+            db = by_date.get(d_str)
+            has_data = db is not None and db["duration_sec"] > 0
+            if has_data:
+                active_days += 1
+            tot_wh = float(db["total_wh"]) if db else 0.0
+            pc_wh = float(db["pc_wh"]) if db else 0.0
+            mon_wh = float(db["monitors_wh"]) if db else 0.0
+            cost_ntd = float(db["cost_ntd"]) if db else 0.0
+            dur_sec = float(db["duration_sec"]) if db else 0.0
+            mon_sec = float(db["monitor_on_sec"]) if db else 0.0
+
+            calendar_days.append(
+                {
+                    "day": day,
+                    "date": d_str,
+                    "weekday": d_obj.weekday(),
+                    "total_wh": round(tot_wh, 2),
+                    "total_kwh": round(tot_wh / 1000.0, 4),
+                    "pc_wh": round(pc_wh, 2),
+                    "monitors_wh": round(mon_wh, 2),
+                    "cost_ntd": round(cost_ntd, 2),
+                    "duration_sec": round(dur_sec, 1),
+                    "monitor_on_sec": round(mon_sec, 1),
+                    "has_data": has_data,
+                }
+            )
+            daily_series.append(
+                {
+                    "label": f"{day}",
+                    "date": d_str,
+                    "pc_wh": round(pc_wh, 2),
+                    "monitors_wh": round(mon_wh, 2),
+                    "external_wh": round(float(db["external_wh"]) if db else 0.0, 2),
+                    "total_wh": round(tot_wh, 2),
+                    "cost_ntd": round(cost_ntd, 3),
+                }
+            )
+
+        summary.update(
+            {
+                "year": year,
+                "month": month,
+                "month_key": f"{year:04d}-{month:02d}",
+                "month_label": f"{year}年{month}月",
+                "days_in_month": num_days,
+                "first_weekday_sun0": first_wd_sun0,
+                "active_days": active_days,
+                "available_months": self.get_available_months(),
+                "calendar_days": calendar_days,
+                "series": daily_series,
+            }
+        )
+        return summary
 
     def export_csv(
         self,
@@ -374,8 +486,18 @@ class Storage:
         rate_ntd: float = 3.13,
         ref_date: datetime.date | None = None,
         cfg: dict[str, Any] | None = None,
+        month_key: str | None = None,
     ) -> str:
-        start_date, end_date = self._date_bounds(range_key, ref_date=ref_date)
+        if range_key == "month":
+            if month_key and "-" in month_key:
+                y_s, m_s = month_key.split("-", 1)
+                year, month = int(y_s), int(m_s)
+            else:
+                td = ref_date or datetime.date.today()
+                year, month = td.year, td.month
+            start_date, end_date, _ = self._month_bounds(year, month)
+        else:
+            start_date, end_date = self._date_bounds(range_key, ref_date=ref_date)
         with self._lock:
             rows = self._conn.execute(
                 """

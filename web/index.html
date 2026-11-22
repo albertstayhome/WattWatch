@@ -48,9 +48,9 @@
         <div class="kpi-sub" id="kpi-mon-sub">今日顯示器 -- 度 (NT$ --) ｜ 開啟時長 --</div>
       </div>
       <div class="kpi-card">
-        <div class="kpi-label">若維持目前功耗預估月電費</div>
-        <div class="kpi-value">NT$ <span id="kpi-month-cost">--</span></div>
-        <div class="kpi-sub" id="kpi-month-sub">約 -- 度/月（以每日 10 小時推算）</div>
+        <div class="kpi-label" id="kpi-month-label">本月日曆累計</div>
+        <div class="kpi-value"><span id="kpi-month-kwh">--</span> <span class="unit">度 (kWh)</span></div>
+        <div class="kpi-sub" id="kpi-month-sub">約 NT$ -- ｜ 已記錄 -- 天</div>
       </div>
     </section>
 
@@ -210,6 +210,7 @@
             <div class="range-pills" id="history-range-pills">
               <button class="range-btn" data-range="session">本次啟動</button>
               <button class="range-btn active" data-range="today">今日</button>
+              <button class="range-btn" data-range="month">本月日曆</button>
               <button class="range-btn" data-range="7d">近 7 天</button>
               <button class="range-btn" data-range="30d">近 30 天</button>
             </div>
@@ -219,6 +220,22 @@
         </div>
 
         <div class="history-kpis" id="history-kpis"></div>
+
+        <div class="subpanel hidden" id="month-calendar-panel" style="margin-top: 16px;">
+          <div class="calendar-bar">
+            <h3>📅 當月日曆每日用電明細</h3>
+            <div class="calendar-nav">
+              <button class="btn btn-sm btn-secondary" id="btn-prev-month">◀ 上個月</button>
+              <strong id="cal-month-title">--</strong>
+              <button class="btn btn-sm btn-secondary" id="btn-next-month">下個月 ▶</button>
+            </div>
+          </div>
+          <div class="calendar-weekdays">
+            <span>日</span><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span>
+          </div>
+          <div class="calendar-grid" id="calendar-grid"></div>
+          <div class="cal-detail-strip hidden" id="calendar-day-detail"></div>
+        </div>
 
         <div class="two-col" style="margin-top: 16px;">
           <div class="subpanel">

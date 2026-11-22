@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Web.Script.Serialization;
 using LibreHardwareMonitor.Hardware;
@@ -48,6 +50,22 @@ namespace WattWatchBridge
         private static volatile bool _running = true;
         private static volatile int _intervalMs = 1000;
 
+        [DllImport("kernel32.dll")]
+        private static extern bool SetProcessWorkingSetSize(IntPtr proc, IntPtr min, IntPtr max);
+
+        private static void TrimMemory()
+        {
+            try
+            {
+                GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true);
+                GC.WaitForPendingFinalizers();
+                SetProcessWorkingSetSize(Process.GetCurrentProcess().Handle, (IntPtr)(-1), (IntPtr)(-1));
+            }
+            catch
+            {
+            }
+        }
+
         private static bool TryValidFloat(float? val, out double result)
         {
             result = 0.0;
@@ -91,6 +109,10 @@ namespace WattWatchBridge
                         _running = false;
                         break;
                     }
+                    if (trimmed.Equals("gc", StringComparison.OrdinalIgnoreCase))
+                    {
+                        TrimMemory();
+                    }
                     if (trimmed.StartsWith("interval ", StringComparison.OrdinalIgnoreCase))
                     {
                         int ms;
@@ -112,6 +134,13 @@ namespace WattWatchBridge
         private static void Main(string[] args)
         {
             Thread.CurrentThread.CurrentCulture = CultureInfo.InvariantCulture;
+            try
+            {
+                Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.BelowNormal;
+            }
+            catch
+            {
+            }
 
             Thread watcher = new Thread(StdinWatcher);
             watcher.IsBackground = true;
@@ -135,6 +164,7 @@ namespace WattWatchBridge
 
             UpdateVisitor visitor = new UpdateVisitor();
             JavaScriptSerializer serializer = new JavaScriptSerializer();
+            bool didInitialTrim = false;
 
             while (_running)
             {
@@ -144,6 +174,11 @@ namespace WattWatchBridge
                 }
                 catch
                 {
+                }
+                if (!didInitialTrim)
+                {
+                    didInitialTrim = true;
+                    TrimMemory();
                 }
 
                 double? cpuPowerW = null;

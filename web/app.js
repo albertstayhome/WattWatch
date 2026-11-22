@@ -1,11 +1,16 @@
 (() => {
   "use strict";
 
+  const nowDate = new Date();
+  const curMonthKey = `${nowDate.getFullYear()}-${String(nowDate.getMonth() + 1).padStart(2, "0")}`;
+
   const state = {
     live: null,
     hardware: null,
     configData: null,
     historyRange: "today",
+    selectedMonth: curMonthKey,
+    selectedCalDate: null,
     scenario: "monitor_only",
     simPeriod: "avg",
     wasteHours: 8,
@@ -214,13 +219,10 @@
     $("kpi-mon-w").textContent = monW.toFixed(1);
     $("kpi-mon-sub").textContent = `今日顯示器 ${(today.monitors_kwh || 0).toFixed(3)} 度 (NT$ ${(today.monitors_cost_ntd || 0).toFixed(2)}) ｜ 開啟 ${fmtDur(today.monitor_on_sec)}`;
 
-    const monthRate = tariff.weekly_avg_rate || rate;
-    const monthKwh = (totalW * 10 * 30) / 1000;
-    $("kpi-month-cost").textContent = (monthKwh * monthRate).toFixed(0);
-    $("kpi-month-sub").textContent =
-      tariff.mode === "tou_2tier"
-        ? `約 ${monthKwh.toFixed(1)} 度/月（依二段式週均費率 ${monthRate.toFixed(2)} 元/度・每日10小時推算）`
-        : `約 ${monthKwh.toFixed(1)} 度/月（以每日 10 小時推算）`;
+    const tm = snap.this_month || {};
+    $("kpi-month-label").textContent = tm.month_label ? `${tm.month_label} 日曆累計` : "本月日曆累計";
+    $("kpi-month-kwh").textContent = (tm.total_kwh || 0).toFixed(3);
+    $("kpi-month-sub").textContent = `約 NT$ ${(tm.total_cost_ntd || 0).toFixed(2)} ｜ 已記錄 ${tm.active_days || 0} 天 (${fmtDur(tm.duration_sec)})`;
 
     // Status pill (objective telemetry status)
     const pill = $("live-status-pill");
@@ -487,9 +489,31 @@
     });
   });
 
+  function shiftMonth(monthKey, delta) {
+    const [y, m] = monthKey.split("-").map(Number);
+    const d = new Date(y, m - 1 + delta, 1);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  }
+
+  $("btn-prev-month").addEventListener("click", () => {
+    state.selectedMonth = shiftMonth(state.selectedMonth, -1);
+    state.selectedCalDate = null;
+    loadHistory();
+  });
+
+  $("btn-next-month").addEventListener("click", () => {
+    state.selectedMonth = shiftMonth(state.selectedMonth, 1);
+    state.selectedCalDate = null;
+    loadHistory();
+  });
+
   async function loadHistory() {
     try {
-      const r = await fetch(`/api/history?range=${encodeURIComponent(state.historyRange)}`);
+      let url = `/api/history?range=${encodeURIComponent(state.historyRange)}`;
+      if (state.historyRange === "month") {
+        url += `&month=${encodeURIComponent(state.selectedMonth)}`;
+      }
+      const r = await fetch(url);
       const data = await r.json();
       renderHistory(data);
     } catch (err) {
@@ -497,17 +521,94 @@
     }
   }
 
+  function renderCalendar(data) {
+    const panel = $("month-calendar-panel");
+    if (state.historyRange !== "month" || !Array.isArray(data.calendar_days)) {
+      panel.classList.add("hidden");
+      return;
+    }
+    panel.classList.remove("hidden");
+    $("cal-month-title").textContent = data.month_label || state.selectedMonth;
+
+    const days = data.calendar_days;
+    const maxWh = Math.max(10, ...days.map((d) => d.total_wh || 0));
+    const todayIso = `${nowDate.getFullYear()}-${String(nowDate.getMonth() + 1).padStart(2, "0")}-${String(nowDate.getDate()).padStart(2, "0")}`;
+
+    const cells = [];
+    for (let i = 0; i < (data.first_weekday_sun0 || 0); i++) {
+      cells.push(`<div class="cal-cell empty"></div>`);
+    }
+    for (const d of days) {
+      const heat = d.has_data ? (0.08 + 0.34 * Math.min(1, d.total_wh / maxWh)).toFixed(2) : "0";
+      const cls = [
+        "cal-cell",
+        d.has_data ? "has-data" : "",
+        d.date === todayIso ? "today" : "",
+        d.date === state.selectedCalDate ? "selected" : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
+      cells.push(`
+        <div class="${cls}" data-date="${d.date}" style="--heat:${heat}">
+          <div class="cal-day-num">${d.day}</div>
+          ${
+            d.has_data
+              ? `<div><div class="cal-kwh">${d.total_kwh.toFixed(2)} 度</div><div class="cal-cost">NT$ ${d.cost_ntd.toFixed(1)}</div></div>`
+              : `<div class="cal-cost" style="color:#475569">—</div>`
+          }
+        </div>
+      `);
+    }
+    const grid = $("calendar-grid");
+    grid.innerHTML = cells.join("");
+
+    const detailBox = $("calendar-day-detail");
+    const renderDayDetail = (iso) => {
+      const item = days.find((x) => x.date === iso);
+      if (!item) {
+        detailBox.classList.add("hidden");
+        return;
+      }
+      detailBox.classList.remove("hidden");
+      if (!item.has_data) {
+        detailBox.innerHTML = `<strong>${item.date}</strong>：當日尚無紀錄資料`;
+        return;
+      }
+      detailBox.innerHTML =
+        `<strong>${item.date}</strong> ｜ 總電量：<b>${item.total_kwh.toFixed(3)} 度</b> (${item.total_wh.toFixed(1)} Wh) ｜ 預估電費：<b>NT$ ${item.cost_ntd.toFixed(2)}</b><br/>` +
+        `主機：${item.pc_wh.toFixed(1)} Wh ｜ 顯示器：${item.monitors_wh.toFixed(1)} Wh ｜ 記錄時長：${fmtDur(item.duration_sec)}（顯示器開啟 ${fmtDur(item.monitor_on_sec)}）`;
+    };
+
+    if (state.selectedCalDate) renderDayDetail(state.selectedCalDate);
+    else if (days.some((d) => d.date === todayIso && d.has_data)) renderDayDetail(todayIso);
+    else detailBox.classList.add("hidden");
+
+    grid.querySelectorAll(".cal-cell:not(.empty)").forEach((cell) => {
+      cell.addEventListener("click", () => {
+        state.selectedCalDate = cell.dataset.date;
+        grid.querySelectorAll(".cal-cell").forEach((c) => c.classList.remove("selected"));
+        cell.classList.add("selected");
+        renderDayDetail(state.selectedCalDate);
+      });
+    });
+  }
+
   function renderHistory(data) {
     const avgW = data.duration_sec > 0 ? data.total_wh / (data.duration_sec / 3600) : 0;
+    const subDur =
+      state.historyRange === "month" && data.active_days !== undefined
+        ? `記錄 ${data.active_days} / ${data.days_in_month} 天 (${fmtDur(data.duration_sec)})`
+        : `記錄時長 ${fmtDur(data.duration_sec)}`;
     $("history-kpis").innerHTML = [
       { label: "期間總耗電", val: `${(data.total_kwh || 0).toFixed(4)} 度`, sub: `${(data.total_wh || 0).toFixed(1)} Wh` },
-      { label: "期間預估電費", val: `NT$ ${(data.total_cost_ntd || 0).toFixed(2)}`, sub: `記錄時長 ${fmtDur(data.duration_sec)}` },
+      { label: "期間預估電費", val: `NT$ ${(data.total_cost_ntd || 0).toFixed(2)}`, sub: subDur },
       { label: "顯示器用電佔比", val: `${(data.monitor_pct || 0).toFixed(1)}%`, sub: `${(data.monitors_wh || 0).toFixed(1)} Wh (NT$ ${(data.monitors_cost_ntd || 0).toFixed(2)})` },
       { label: "期間平均總功耗", val: `${avgW.toFixed(1)} W`, sub: `顯示器開啟 ${fmtDur(data.monitor_on_sec)}` },
     ]
       .map((k) => `<div class="subpanel"><div class="kpi-label">${k.label}</div><div style="font-size:20px;font-weight:700">${k.val}</div><div class="small-muted">${k.sub}</div></div>`)
       .join("");
 
+    renderCalendar(data);
     drawHistoryBarChart(data.series || []);
     drawDonut(data);
 
@@ -809,7 +910,9 @@
 
   $("btn-export-csv").addEventListener("click", () => {
     const rng = state.historyRange === "session" ? "today" : state.historyRange;
-    window.location.href = `/api/export.csv?range=${encodeURIComponent(rng)}`;
+    let url = `/api/export.csv?range=${encodeURIComponent(rng)}`;
+    if (rng === "month") url += `&month=${encodeURIComponent(state.selectedMonth)}`;
+    window.location.href = url;
   });
 
   $("btn-reset-session").addEventListener("click", async () => {

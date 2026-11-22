@@ -144,7 +144,14 @@ def create_app(
             eng.stop()
             store.close()
 
-    app = FastAPI(title="WattWatch 電量偵測管家", version="1.0.0", lifespan=lifespan)
+    app = FastAPI(
+        title="WattWatch 電量偵測管家",
+        version="1.0.0",
+        lifespan=lifespan,
+        openapi_url=None,
+        docs_url=None,
+        redoc_url=None,
+    )
     app.state.config = cfg
     app.state.storage = store
     app.state.engine = eng
@@ -184,8 +191,11 @@ def create_app(
             eng.unregister_ui_client()
 
     @app.get("/api/history")
-    async def api_history(range: str = Query("today", pattern="^(today|7d|30d|session)$")):
-        return eng.get_history(range)
+    async def api_history(
+        range: str = Query("today", pattern="^(today|month|7d|30d|session)$"),
+        month: str | None = Query(None, pattern=r"^\d{4}-\d{2}$"),
+    ):
+        return eng.get_history(range, month_key=month)
 
     @app.get("/api/hardware")
     async def api_hardware():
@@ -251,13 +261,20 @@ def create_app(
             )
 
     @app.get("/api/export.csv")
-    async def api_export_csv(range: str = Query("today", pattern="^(today|7d|30d)$")):
+    async def api_export_csv(
+        range: str = Query("today", pattern="^(today|month|7d|30d)$"),
+        month: str | None = Query(None, pattern=r"^\d{4}-\d{2}$"),
+    ):
         eng.flush_now()
         current_cfg = cfg.get()
         rate = float(get_effective_rate_info(current_cfg)["rate_ntd"])
-        csv_text = store.export_csv(range_key=range, rate_ntd=rate, cfg=current_cfg)
-        date_tag = datetime.date.today().strftime("%Y%m%d")
-        filename = f"wattwatch_{range}_{date_tag}.csv"
+        csv_text = store.export_csv(range_key=range, rate_ntd=rate, cfg=current_cfg, month_key=month)
+        if range == "month":
+            m_tag = (month or datetime.date.today().strftime("%Y-%m")).replace("-", "")
+            filename = f"wattwatch_month_{m_tag}.csv"
+        else:
+            date_tag = datetime.date.today().strftime("%Y%m%d")
+            filename = f"wattwatch_{range}_{date_tag}.csv"
         return Response(
             content=csv_text.encode("utf-8"),
             media_type="text/csv; charset=utf-8",
